@@ -42,6 +42,9 @@ def make_synthetic_stream(seed: int = 7, n: int = 2400) -> tuple[pd.DataFrame, n
             "command": command,
         }
     )
+    frame["event_id"] = None
+    for start in event_starts:
+        frame.loc[start, "event_id"] = f"synthetic-event-{start}"
     return frame, event_starts
 
 
@@ -51,12 +54,17 @@ def run_demo(seed: int = 7) -> dict:
         frame["value"].to_numpy(),
         frame["timestamp"].to_numpy(),
         event_starts=event_starts,
+        event_ids=frame["event_id"].to_numpy(),
         modes=frame["mode"].to_numpy(),
         lookback=24,
         horizon=12,
     )
     split = chronological_split(
-        len(windows.X), calibration_fraction=0.2, test_fraction=0.2, purge_steps=24
+        len(windows.X),
+        calibration_fraction=0.2,
+        test_fraction=0.2,
+        timestamps=windows.timestamps,
+        purge_seconds=24 * 60,
     )
     calibration_origins = windows.origins[split.calibration]
     safe_origins = event_safe_indices(calibration_origins, event_starts, lookback=24, horizon=12)
@@ -78,6 +86,9 @@ def run_demo(seed: int = 7) -> dict:
         horizon=12,
         cooldown_steps=12,
         total_duration_steps=len(split.test),
+        timestamps=windows.timestamps[split.test],
+        cooldown_seconds=12 * 60,
+        max_gap_seconds=5 * 60,
     )
 
     # Persistence point forecasts use the last observed finite value. The

@@ -5,8 +5,13 @@ import pytest
 from spacecraft_warning.conformal import ModeConditionalConformal
 from spacecraft_warning.benchmark import run_csv_benchmark
 from spacecraft_warning.data import make_windows, validate_telemetry_frame
-from spacecraft_warning.metrics import calibration_metrics, event_warning_metrics
-from spacecraft_warning.splits import chronological_split, event_safe_indices
+from spacecraft_warning.metrics import calibration_metrics, event_warning_metrics, monitored_exposure_seconds
+from spacecraft_warning.splits import (
+    assert_disjoint_groups,
+    chronological_split,
+    event_safe_indices,
+    mission_holdout_split,
+)
 
 
 def test_chronological_split_is_disjoint_and_ordered():
@@ -23,6 +28,38 @@ def test_purged_split_leaves_embargo_rows():
     assert split.calibration[-1] + 5 < split.test[0]
 
 
+def test_physical_time_purge_handles_irregular_cadence():
+    timestamps = np.arange(60, dtype="timedelta64[m]") + np.datetime64("2020-01-01T00:00:00")
+    timestamps[30:] += np.timedelta64(30, "m")
+    split = chronological_split(
+        len(timestamps),
+        calibration_fraction=0.2,
+        test_fraction=0.2,
+        timestamps=timestamps,
+        purge_seconds=600,
+    )
+    assert timestamps[split.train[-1]] < timestamps[split.calibration[0]] - np.timedelta64(600, "s")
+    assert timestamps[split.calibration[-1]] < timestamps[split.test[0]] - np.timedelta64(600, "s")
+
+
+def test_mission_holdout_has_no_mission_overlap():
+    missions = np.array(["m1"] * 4 + ["m2"] * 4 + ["m3"] * 4, dtype=object)
+    split = mission_holdout_split(missions, "m3", calibration_fraction=0.25, test_fraction=0.25)
+    assert set(missions[split.test]) == {"m3"}
+    assert "m3" not in set(missions[split.train])
+    assert "m3" not in set(missions[split.calibration])
+
+
+def test_event_groups_cannot_cross_split_boundaries():
+    split = chronological_split(12, calibration_fraction=0.25, test_fraction=0.25)
+    groups = np.array(["a"] * 6 + ["b"] * 3 + ["c"] * 3, dtype=object)
+    assert_disjoint_groups(split, groups)
+    crossing = groups.copy()
+    crossing[split.calibration[0]] = "a"
+    with pytest.raises(ValueError, match="crosses split boundaries"):
+        assert_disjoint_groups(split, crossing)
+
+
 def test_event_safe_indices_removes_touching_windows():
     kept = event_safe_indices([10, 20, 30], [20], lookback=5, horizon=3)
     assert kept.tolist() == [10, 30]
@@ -36,6 +73,22 @@ def test_windows_use_future_only_for_targets_and_preserve_missingness():
     assert windows.y.max() == 1
     # The missingness indicator is part of the feature vector.
     assert windows.X[4, 5 + 4] == 1.0
+
+
+def test_windows_preserve_target_event_identity():
+    values = np.arange(20, dtype=float)
+    event_ids = np.full(20, None, dtype=object)
+    event_ids[12] = "event-a"
+    windows = make_windows(
+        values,
+        np.arange(20),
+        event_starts=[12],
+        event_ids=event_ids,
+        lookback=4,
+        horizon=3,
+    )
+    matching = windows.target_event_ids[windows.y == 1]
+    assert matching.tolist() == ["event-a", "event-a", "event-a"]
 
 
 def test_conformal_falls_back_for_unseen_modes():
@@ -61,6 +114,26 @@ def test_event_metrics_count_events_not_points():
     )
     assert result["detected_events"] == 1
     assert result["events"] == 1
+
+
+def test_physical_exposure_censors_large_gaps():
+    timestamps = np.array(
+        ["2020-01-01T00:00:00", "2020-01-01T00:01:00", "2020-01-01T01:01:00"],
+        dtype="datetime64[ns]",
+    )
+    assert monitored_exposure_seconds(timestamps, max_gap_seconds=120) == 60.0
+    result = event_warning_metrics(
+        scores=np.array([2.0, 0.0, 0.0]),
+        event_starts=np.array([2]),
+        origins=np.array([0, 1, 2]),
+        threshold=1.0,
+        horizon=3,
+        timestamps=timestamps,
+        cooldown_seconds=30,
+        max_gap_seconds=120,
+    )
+    assert result["exposure_seconds"] == 60.0
+    assert result["false_alarms_per_day"] == 0.0
 
 
 def test_one_alert_cannot_claim_two_events():
@@ -117,3 +190,26 @@ def test_csv_runner_requires_and_uses_onset_labels(tmp_path):
     result = run_csv_benchmark(path, lookback=8, horizon=4)
     assert result["streams_evaluated"] == 1
     assert result["results"][0]["events"] == 2
+
+
+def test_csv_runner_can_hold_out_a_complete_mission(tmp_path):
+    n = 240
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=n, freq="min", tz="UTC"),
+            "asset_id": "a",
+            "channel_id": "c",
+            "mission_id": ["m1"] * 120 + ["m2"] * 120,
+            "value": np.sin(np.arange(n) / 4),
+            "anomaly_start": False,
+        }
+    )
+    frame.loc[[40, 180], "anomaly_start"] = True
+    path = tmp_path / "multi_mission.csv"
+    frame.to_csv(path, index=False)
+    result = run_csv_benchmark(path, lookback=8, horizon=4, held_out_mission="m2")
+    held_out = result["results"][0]
+    assert held_out["held_out_mission"] == "m2"
+    assert held_out["train_windows"] > 0
+    assert held_out["calibration_windows"] > 0
+    assert held_out["test_windows"] > 0

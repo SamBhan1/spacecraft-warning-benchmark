@@ -23,6 +23,7 @@ class WindowedTelemetry:
     modes: np.ndarray
     timestamps: np.ndarray
     targets: np.ndarray
+    target_event_ids: np.ndarray
 
 
 def validate_telemetry_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -52,10 +53,26 @@ def _event_target(event_starts: Iterable[int], origin: int, horizon: int) -> int
     return int(np.any((starts > origin) & (starts <= origin + horizon)))
 
 
+def _target_event_id(
+    event_starts: np.ndarray,
+    event_ids: np.ndarray,
+    origin: int,
+    horizon: int,
+) -> object:
+    """Return the first event identity in the forecast window, if available."""
+
+    candidates = event_starts[(event_starts > origin) & (event_starts <= origin + horizon)]
+    if candidates.size == 0 or event_ids.size == 0:
+        return None
+    candidate = event_ids[int(candidates[0])]
+    return None if pd.isna(candidate) else candidate
+
+
 def make_windows(
     values: Iterable[float],
     timestamps: Iterable[object],
     event_starts: Iterable[int] = (),
+    event_ids: Iterable[object] | None = None,
     modes: Iterable[object] | None = None,
     lookback: int = 24,
     horizon: int = 6,
@@ -78,6 +95,12 @@ def make_windows(
     if len(mode_array) != len(series):
         raise ValueError("modes must have equal length to values")
     starts = np.asarray(list(event_starts), dtype=int)
+    if event_ids is None:
+        event_id_array = np.full(len(series), None, dtype=object)
+    else:
+        event_id_array = np.asarray(list(event_ids), dtype=object)
+        if len(event_id_array) != len(series):
+            raise ValueError("event_ids must have equal length to values")
 
     X: list[np.ndarray] = []
     y: list[int] = []
@@ -85,6 +108,7 @@ def make_windows(
     mode_out: list[object] = []
     time_out: list[object] = []
     target_out: list[float] = []
+    target_event_id_out: list[object] = []
     for origin in range(lookback - 1, len(series) - horizon):
         window = series[origin - lookback + 1 : origin + 1]
         missing = np.isnan(window).astype(float)
@@ -96,6 +120,7 @@ def make_windows(
         mode_out.append(mode_array[origin])
         time_out.append(times[origin])
         target_out.append(series[origin + horizon])
+        target_event_id_out.append(_target_event_id(starts, event_id_array, origin, horizon))
     return WindowedTelemetry(
         X=np.asarray(X, dtype=float),
         y=np.asarray(y, dtype=int),
@@ -103,4 +128,5 @@ def make_windows(
         modes=np.asarray(mode_out, dtype=object),
         timestamps=np.asarray(time_out),
         targets=np.asarray(target_out, dtype=float),
+        target_event_ids=np.asarray(target_event_id_out, dtype=object),
     )

@@ -6,10 +6,11 @@ This is the first implementation of the narrowed research project:
 > anomaly event will begin within a fixed horizon, while remaining reliable
 > under unseen modes, missingness, spacecraft, and missions?
 
-The package is deliberately evaluation-first. It provides chronological
-train/calibration/test splits, event-safe window construction, persistence and
-logistic baselines, conformal forecast intervals, mode-conditional calibration,
-and event-level warning metrics.
+The package is deliberately evaluation-first. It provides chronological and
+mission-held-out train/calibration/test splits, physical-time embargoes,
+event-aware windows, persistence and logistic baselines, conformal forecast
+intervals, mode-conditional calibration, and event-level warning metrics with
+physical exposure accounting.
 
 ## Publication status and safety boundary
 
@@ -34,14 +35,14 @@ the source license and dataset card alongside the downloaded files.
 From the repository root:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path .\spacecraft_warning\src).Path
-python .\spacecraft_warning\scripts\run_demo.py --output .\spacecraft_warning\artifacts\demo.json
-pytest -q .\spacecraft_warning\tests
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python .\scripts\run_demo.py --output .\artifacts\demo.json
+pytest -q .\tests
 ```
 
 If package installation is desired and the machine already has the build
-dependencies cached, `python -m pip install --no-build-isolation -e
-.\spacecraft_warning` is supported. The `PYTHONPATH` route is the offline-safe
+dependencies cached, `python -m pip install --no-build-isolation -e .` is
+supported. The `PYTHONPATH` route is the offline-safe
 default.
 
 The demo prints a JSON summary containing the chronological split, event counts,
@@ -64,6 +65,22 @@ scientific performance claim.
 6. Never describe interval noncoverage or anomaly-onset warning as a physical
    failure probability without mission-specific labels and validation.
 
+For irregular telemetry, pass `purge_seconds` and `cooldown_seconds` to the CSV
+runner. The resulting `false_alarms_per_day` uses observed wall-clock exposure;
+pass `max_gap_seconds` to censor communication gaps instead of counting them as
+nominal monitoring time. Use `mission_holdout_split` for a complete-domain
+confirmation test and `assert_disjoint_groups` to fail fast when event or
+episode identities cross split boundaries.
+
+Example physical-time and mission-held-out run:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python .\scripts\run_csv_benchmark.py .\data\mission.csv `
+  --purge-seconds 3600 --cooldown-seconds 1800 --max-gap-seconds 300 `
+  --held-out-mission mission-2 --output .\artifacts\mission-2.json
+```
+
 The CSV runner reports false alarms per 1,000 rows and records median cadence
 and irregular-cadence status. Convert row-based rates to mission-day rates only
 after a dataset-specific cadence and gap policy has been reviewed.
@@ -78,9 +95,11 @@ Choose and add an explicit software license before public release.
 ## Layout
 
 - `src/spacecraft_warning/` — reusable benchmark code.
-- `data/SCHEMA.md` — input contract for real telemetry adapters.
+- `data/SCHEMA.md` — input contract for real telemetry adapters, including
+  mission and event provenance.
 - `configs/default.json` — conservative default evaluation settings.
 - `scripts/run_demo.py` — executable demo wrapper.
 - `scripts/run_csv_benchmark.py` — adapter-free runner for labeled long-form CSVs.
 - `tests/` — tests for split isolation, calibration, and metrics.
-- `artifacts/` — local demo outputs; generated files are ignored by Git.
+- `artifacts/demo.json` — checked-in synthetic smoke-test output; write local
+  experiment results under `artifacts/local/`, which is ignored by Git.
