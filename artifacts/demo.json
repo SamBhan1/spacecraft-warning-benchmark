@@ -1,0 +1,34 @@
+{
+  "conformal_global_radius": 0.44184680603886295,
+  "conformal_test_coverage": 0.8652173913043478,
+  "event_starts": [
+    560,
+    1020,
+    1510,
+    2050
+  ],
+  "logistic_calibration": {
+    "brier": 0.02579102043589787,
+    "expected_calibration_error": 0.004525455688246388
+  },
+  "logistic_probability_calibrated": true,
+  "n_observations": 2400,
+  "n_windows": 2365,
+  "note": "Synthetic smoke test only; not a NASA or flight-performance result.",
+  "persistence_warning": {
+    "alerts": 14,
+    "detected_events": 0,
+    "events": 1,
+    "false_alarms_per_1000_steps": 29.598308668076108,
+    "false_alerts": 14,
+    "mean_warning_lead_steps": null,
+    "precision": 0.0,
+    "recall": 0.0
+  },
+  "split_sizes": {
+    "calibration": 449,
+    "test": 473,
+    "train": 1395
+  },
+  "synthetic_only": true
+}

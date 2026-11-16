@@ -1,0 +1,10 @@
+{
+  "lookback": 24,
+  "horizon": 6,
+  "calibration_fraction": 0.2,
+  "test_fraction": 0.2,
+  "alpha": 0.1,
+  "warning_threshold": 0.8,
+  "cooldown_steps": 6,
+  "seed": 7
+}
