@@ -66,24 +66,30 @@ scientific performance claim.
    failure probability without mission-specific labels and validation.
 
 For irregular telemetry, pass `purge_seconds` and `cooldown_seconds` to the CSV
-runner. The resulting `false_alarms_per_day` uses observed wall-clock exposure;
-pass `max_gap_seconds` to censor communication gaps instead of counting them as
-nominal monitoring time. Use `mission_holdout_split` for a complete-domain
-confirmation test and `assert_disjoint_groups` to fail fast when event or
-episode identities cross split boundaries.
+runner. Use `--horizon-seconds` to derive a channel-specific row horizon from
+the median cadence; otherwise `--horizon` is a row count and has different
+physical meaning across channels. The resulting `false_alarms_per_day` uses
+observed wall-clock exposure; pass `max_gap_seconds` to censor communication
+gaps instead of counting them as nominal monitoring time. Use
+`mission_holdout_split` for a complete-domain confirmation test and
+`assert_disjoint_groups` to fail fast when event or episode identities cross
+split boundaries.
 
 Example physical-time and mission-held-out run:
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path .\src).Path
 python .\scripts\run_csv_benchmark.py .\data\mission.csv `
-  --purge-seconds 3600 --cooldown-seconds 1800 --max-gap-seconds 300 `
+  --horizon-seconds 1800 --purge-seconds 3600 --cooldown-seconds 1800 --max-gap-seconds 300 `
   --held-out-mission mission-2 --output .\artifacts\mission-2.json
 ```
 
 The CSV runner reports false alarms per 1,000 rows and records median cadence
-and irregular-cadence status. Convert row-based rates to mission-day rates only
-after a dataset-specific cadence and gap policy has been reviewed.
+and irregular-cadence status. Its `logistic_calibration` field is a raw
+uncalibrated diagnostic unless `logistic_probability_status` says otherwise;
+event-free threshold calibration is intentionally reported separately. Convert
+row-based rates to mission-day rates only after a dataset-specific cadence,
+duplicate-timestamp, and gap policy has been reviewed.
 
 ## Data and licensing
 

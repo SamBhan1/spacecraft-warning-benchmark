@@ -76,6 +76,7 @@ def make_windows(
     modes: Iterable[object] | None = None,
     lookback: int = 24,
     horizon: int = 6,
+    max_gap_seconds: float | None = None,
 ) -> WindowedTelemetry:
     """Create lag windows without peeking beyond each forecast origin.
 
@@ -87,6 +88,8 @@ def make_windows(
 
     if lookback < 2 or horizon < 1:
         raise ValueError("lookback must be >= 2 and horizon must be >= 1")
+    if max_gap_seconds is not None and max_gap_seconds <= 0:
+        raise ValueError("max_gap_seconds must be positive")
     series = np.asarray(list(values), dtype=float)
     times = np.asarray(list(timestamps))
     if len(series) != len(times):
@@ -102,6 +105,16 @@ def make_windows(
         if len(event_id_array) != len(series):
             raise ValueError("event_ids must have equal length to values")
 
+    valid_origins = np.ones(len(series), dtype=bool)
+    if max_gap_seconds is not None:
+        parsed_times = pd.to_datetime(times, errors="coerce", utc=True)
+        if parsed_times.isna().any():
+            raise ValueError("timestamps must be parseable when max_gap_seconds is supplied")
+        gap_seconds = parsed_times.to_series().diff().dt.total_seconds().to_numpy()
+        for origin in range(lookback - 1, len(series) - horizon):
+            window_gaps = gap_seconds[origin - lookback + 2 : origin + horizon + 1]
+            valid_origins[origin] = not np.any(window_gaps > max_gap_seconds)
+
     X: list[np.ndarray] = []
     y: list[int] = []
     origins: list[int] = []
@@ -110,6 +123,8 @@ def make_windows(
     target_out: list[float] = []
     target_event_id_out: list[object] = []
     for origin in range(lookback - 1, len(series) - horizon):
+        if not valid_origins[origin]:
+            continue
         window = series[origin - lookback + 1 : origin + 1]
         missing = np.isnan(window).astype(float)
         # Preserve the missingness mechanism as explicit features. The raw

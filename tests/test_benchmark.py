@@ -75,6 +75,29 @@ def test_windows_use_future_only_for_targets_and_preserve_missingness():
     assert windows.X[4, 5 + 4] == 1.0
 
 
+def test_windows_skip_context_that_crosses_large_time_gaps():
+    timestamps = np.array(
+        [
+            "2020-01-01T00:00:00",
+            "2020-01-01T00:00:01",
+            "2020-01-01T00:00:02",
+            "2020-01-01T00:10:00",
+            "2020-01-01T00:10:01",
+            "2020-01-01T00:10:02",
+            "2020-01-01T00:10:03",
+        ],
+        dtype="datetime64[s]",
+    )
+    windows = make_windows(
+        np.arange(len(timestamps), dtype=float),
+        timestamps,
+        lookback=3,
+        horizon=1,
+        max_gap_seconds=10,
+    )
+    assert windows.origins.tolist() == [5]
+
+
 def test_windows_preserve_target_event_identity():
     values = np.arange(20, dtype=float)
     event_ids = np.full(20, None, dtype=object)
@@ -190,6 +213,28 @@ def test_csv_runner_requires_and_uses_onset_labels(tmp_path):
     result = run_csv_benchmark(path, lookback=8, horizon=4)
     assert result["streams_evaluated"] == 1
     assert result["results"][0]["events"] == 2
+    assert result["results"][0]["logistic_warning"] is not None
+    assert result["results"][0]["calibration_positive_windows"] == 0
+
+
+def test_csv_runner_can_derive_horizon_from_physical_seconds(tmp_path):
+    n = 200
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=n, freq="5s", tz="UTC"),
+            "asset_id": "a",
+            "channel_id": "c",
+            "value": np.sin(np.arange(n) / 4),
+            "anomaly_start": False,
+        }
+    )
+    frame.loc[120, "anomaly_start"] = True
+    path = tmp_path / "physical_horizon.csv"
+    frame.to_csv(path, index=False)
+    result = run_csv_benchmark(path, lookback=8, horizon_seconds=30)
+    stream = result["results"][0]
+    assert stream["horizon_steps"] == 6
+    assert stream["effective_horizon_seconds"] == 30.0
 
 
 def test_csv_runner_can_hold_out_a_complete_mission(tmp_path):

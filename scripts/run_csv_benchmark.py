@@ -15,6 +15,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--lookback", type=int, default=24)
     parser.add_argument("--horizon", type=int, default=6)
+    parser.add_argument(
+        "--horizon-seconds",
+        type=float,
+        default=None,
+        help="Convert a physical warning horizon to channel-specific rows using median cadence.",
+    )
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--cooldown-steps", type=int, default=6)
     parser.add_argument("--purge-seconds", type=float, default=None)
@@ -26,6 +32,7 @@ def main() -> None:
         args.csv,
         lookback=args.lookback,
         horizon=args.horizon,
+        horizon_seconds=args.horizon_seconds,
         alpha=args.alpha,
         cooldown_steps=args.cooldown_steps,
         purge_seconds=args.purge_seconds,

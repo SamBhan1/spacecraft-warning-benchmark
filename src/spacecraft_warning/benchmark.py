@@ -28,6 +28,12 @@ def _is_irregular_cadence(group: pd.DataFrame) -> bool:
     return bool(np.any(np.abs(deltas - median) > max(1.0, abs(median) * 0.01)))
 
 
+def _duplicate_timestamp_groups(group: pd.DataFrame) -> tuple[int, int]:
+    counts = group.groupby("timestamp", sort=False).size()
+    duplicated = counts[counts > 1]
+    return int(len(duplicated)), int(duplicated.sum())
+
+
 def _event_indices(group: pd.DataFrame, column: str) -> np.ndarray:
     values = group[column]
     if pd.api.types.is_bool_dtype(values) or pd.api.types.is_numeric_dtype(values):
@@ -54,6 +60,7 @@ def run_csv_benchmark(
     path: str | Path,
     lookback: int = 24,
     horizon: int = 6,
+    horizon_seconds: float | None = None,
     calibration_fraction: float = 0.2,
     test_fraction: float = 0.2,
     alpha: float = 0.05,
@@ -71,6 +78,8 @@ def run_csv_benchmark(
     unable to distinguish warning from retrospective detection.
     """
 
+    if horizon_seconds is not None and horizon_seconds <= 0:
+        raise ValueError("horizon_seconds must be positive")
     frame = read_telemetry_csv(path)
     if "anomaly_start" not in frame.columns:
         raise ValueError("CSV must contain anomaly_start labels for this benchmark")
@@ -80,7 +89,14 @@ def run_csv_benchmark(
     group_columns = ["asset_id", "channel_id"]
     for (asset_id, channel_id), group in frame.groupby(group_columns, sort=False):
         group = group.sort_values("timestamp", kind="stable").reset_index(drop=True)
+        duplicate_groups, duplicate_rows = _duplicate_timestamp_groups(group)
         events = _event_indices(group, "anomaly_start")
+        median_cadence = _median_cadence_seconds(group)
+        effective_horizon = horizon
+        if horizon_seconds is not None:
+            if median_cadence is None or median_cadence <= 0:
+                raise ValueError(f"cannot derive a row horizon for {asset_id}/{channel_id}")
+            effective_horizon = max(1, int(np.ceil(horizon_seconds / median_cadence)))
         event_identity = _event_ids(group, events)
         event_id_by_start = {int(index): event_identity[position] for position, index in enumerate(events)}
         windows = make_windows(
@@ -93,7 +109,8 @@ def run_csv_benchmark(
             ),
             modes=group["mode"].to_numpy() if "mode" in group else None,
             lookback=lookback,
-            horizon=horizon,
+            horizon=effective_horizon,
+            max_gap_seconds=max_gap_seconds,
         )
         if len(windows.X) < 20:
             continue
@@ -102,7 +119,7 @@ def run_csv_benchmark(
                 len(windows.X),
                 calibration_fraction=calibration_fraction,
                 test_fraction=test_fraction,
-                purge_steps=0 if purge_seconds is not None else max(lookback, horizon),
+                purge_steps=0 if purge_seconds is not None else max(lookback, effective_horizon),
                 timestamps=windows.timestamps if purge_seconds is not None else None,
                 purge_seconds=purge_seconds,
             )
@@ -113,12 +130,12 @@ def run_csv_benchmark(
                 held_out_mission,
                 calibration_fraction=calibration_fraction,
                 test_fraction=test_fraction,
-                purge_steps=0 if purge_seconds is not None else max(lookback, horizon),
+                purge_steps=0 if purge_seconds is not None else max(lookback, effective_horizon),
                 timestamps=windows.timestamps if purge_seconds is not None else None,
                 purge_seconds=purge_seconds,
             )
         calibration_origins = windows.origins[split.calibration]
-        safe_origins = event_safe_indices(calibration_origins, events, lookback, horizon)
+        safe_origins = event_safe_indices(calibration_origins, events, lookback, effective_horizon)
         calibration_rows = split.calibration[np.isin(calibration_origins, safe_origins)]
         if len(calibration_rows) == 0:
             raise ValueError(f"no event-free calibration windows for {asset_id}/{channel_id}")
@@ -131,7 +148,7 @@ def run_csv_benchmark(
             events,
             windows.origins[split.test],
             threshold=threshold,
-            horizon=horizon,
+            horizon=effective_horizon,
             cooldown_steps=cooldown_steps,
             total_duration_steps=len(split.test),
             timestamps=windows.timestamps[split.test],
@@ -148,8 +165,20 @@ def run_csv_benchmark(
             "test_windows": int(len(split.test)),
             "held_out_mission": held_out_mission,
             "persistence_warning": warning,
-            "median_cadence_seconds": _median_cadence_seconds(group),
+            "median_cadence_seconds": median_cadence,
+            "horizon_steps": int(effective_horizon),
+            "requested_horizon_seconds": horizon_seconds,
+            "effective_horizon_seconds": (
+                float(effective_horizon * median_cadence) if median_cadence is not None else None
+            ),
             "irregular_cadence": _is_irregular_cadence(group),
+            "duplicate_timestamp_groups": duplicate_groups,
+            "duplicate_timestamp_rows": duplicate_rows,
+            "physical_time_metrics_status": (
+                "provisional_duplicate_timestamps_present"
+                if duplicate_groups
+                else "provisional_source_cadence_review_required"
+            ),
         }
         if len(np.unique(windows.y[split.train])) > 1:
             logistic = LogisticWarning().fit(windows.X[split.train], windows.y[split.train])
@@ -157,13 +186,41 @@ def run_csv_benchmark(
             if len(np.unique(windows.y[calibration_rows])) > 1:
                 logistic.calibrate(windows.X[calibration_rows], windows.y[calibration_rows])
                 probability_calibrated = True
+            logistic_calibration_scores = logistic.predict_calibrated_proba(windows.X[calibration_rows])
+            logistic_test_scores = logistic.predict_calibrated_proba(windows.X[split.test])
+            logistic_threshold = float(np.quantile(logistic_calibration_scores, 1 - alpha))
             result["logistic_calibration"] = calibration_metrics(
-                logistic.predict_calibrated_proba(windows.X[split.test]), windows.y[split.test]
+                logistic_test_scores, windows.y[split.test]
             )
             result["logistic_probability_calibrated"] = probability_calibrated
+            result["logistic_probability_status"] = (
+                "isotonic_calibrated" if probability_calibrated else "raw_uncalibrated"
+            )
+            result["logistic_warning_threshold"] = logistic_threshold
+            result["logistic_warning"] = event_warning_metrics(
+                logistic_test_scores,
+                events,
+                windows.origins[split.test],
+                threshold=logistic_threshold,
+                horizon=effective_horizon,
+                cooldown_steps=cooldown_steps,
+                total_duration_steps=len(split.test),
+                timestamps=windows.timestamps[split.test],
+                cooldown_seconds=cooldown_seconds,
+                max_gap_seconds=max_gap_seconds,
+            )
+            result["train_positive_windows"] = int(windows.y[split.train].sum())
+            result["calibration_positive_windows"] = int(windows.y[calibration_rows].sum())
+            result["test_positive_windows"] = int(windows.y[split.test].sum())
         else:
             result["logistic_calibration"] = None
             result["logistic_probability_calibrated"] = False
+            result["logistic_probability_status"] = "unavailable_single_training_class"
+            result["logistic_warning_threshold"] = None
+            result["logistic_warning"] = None
+            result["train_positive_windows"] = int(windows.y[split.train].sum())
+            result["calibration_positive_windows"] = int(windows.y[calibration_rows].sum())
+            result["test_positive_windows"] = int(windows.y[split.test].sum())
         results.append(result)
     return {
         "dataset": str(Path(path)),
@@ -175,5 +232,6 @@ def run_csv_benchmark(
             "When held_out_mission is supplied, mission identity is held out per asset/channel and the source domains are split chronologically.",
             "Thresholds and preprocessing are fit without test labels; no result is operational validation.",
             "Use purge_seconds and cooldown_seconds for irregular-cadence physical-time controls; step-based defaults are retained for compatibility.",
+            "Duplicate timestamps are retained in source order; physical-time rates require a dataset-specific duplicate-resolution policy.",
         ],
     }
